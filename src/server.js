@@ -1,9 +1,11 @@
 import express from "express";
 import crypto from "node:crypto";
+import nodemailer from "nodemailer";
 import "dotenv/config";
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
+const notifiedOrderIds = new Set();
 
 const PORT = Number(process.env.PORT || 3000);
 const SOFTSTORE_API_BASE =
@@ -156,6 +158,137 @@ function adminGuard(req, res, next) {
   next();
 }
 
+function getOrderSummary(order, payload) {
+  const source = order && typeof order === "object" ? order : {};
+  const idOrder = payload?.id_order ?? source.id_order ?? "N/A";
+  const productId = payload?.id_product ?? source.id_product ?? source.product_id ?? "N/A";
+  const quantity = source.quantity ?? source.qty ?? source.count ?? source.items?.quantity ?? "N/A";
+  const amount = source.amount ?? source.total_amount ?? source.total ?? source.price ?? "N/A";
+  const currency = source.currency ?? source.currency_code ?? "N/A";
+  const paymentStatus = payload?.payment_status ?? source.payment_status ?? "PAID";
+
+  return {
+    idOrder,
+    productId,
+    quantity,
+    amount,
+    currency,
+    paymentStatus
+  };
+}
+
+function shouldSkipDuplicateNotification(orderId) {
+  if (!orderId || orderId === "N/A") return false;
+  if (notifiedOrderIds.has(String(orderId))) {
+    console.warn(`[notifications] Duplicate notification suppressed for order ID ${orderId}.`);
+    return true;
+  }
+  notifiedOrderIds.add(String(orderId));
+  return false;
+}
+
+async function sendTelegramOrderNotification(order, payload) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+
+  if (!token || !chatId) {
+    console.warn("[telegram] Telegram notification is not configured; skipping.");
+    return false;
+  }
+
+  const summary = getOrderSummary(order, payload);
+  const lines = [
+    "🛒 NEW SOFTSTORE ORDER",
+    "",
+    `Order ID: ${summary.idOrder}`,
+    `Product ID: ${summary.productId}`,
+    `Quantity: ${summary.quantity}`,
+    `Amount: ${summary.amount}`,
+    `Currency: ${summary.currency}`,
+    "Payment Status: PAID"
+  ];
+
+  const extraDetails = [];
+  if (order?.status) extraDetails.push(`Status: ${order.status}`);
+  if (order?.email) extraDetails.push(`Email: ${order.email}`);
+  if (order?.customer_name) extraDetails.push(`Customer: ${order.customer_name}`);
+  if (order?.created_at) extraDetails.push(`Created: ${order.created_at}`);
+
+  if (extraDetails.length) lines.push("", ...extraDetails);
+
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: lines.join("\n"),
+        disable_web_page_preview: true
+      })
+    });
+
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data?.description || `Telegram API failed with status ${response.status}`);
+    }
+
+    return true;
+  } catch (error) {
+    console.error("[telegram] Failed to send notification safely.");
+    console.error(error.message);
+    return false;
+  }
+}
+
+async function sendGmailOrderNotification(order, payload) {
+  const gmailUser = process.env.GMAIL_EMAIL;
+  const gmailAppPassword = process.env.GMAIL_APP_PASSWORD;
+  const notificationEmail = process.env.NOTIFICATION_EMAIL;
+
+  if (!gmailUser || !gmailAppPassword || !notificationEmail) {
+    console.warn("[gmail] Gmail notification is not configured; skipping.");
+    return false;
+  }
+
+  const summary = getOrderSummary(order, payload);
+  const subject = `🛒 New SoftStore Order - ${summary.idOrder}`;
+  const lines = [
+    "New SoftStore order received.",
+    "",
+    `Order ID: ${summary.idOrder}`,
+    `Product ID: ${summary.productId}`,
+    `Quantity: ${summary.quantity}`,
+    `Amount: ${summary.amount}`,
+    `Currency: ${summary.currency}`,
+    "Payment Status: PAID"
+  ];
+
+  if (order?.status) lines.push(`Status: ${order.status}`);
+  if (order?.created_at) lines.push(`Created: ${order.created_at}`);
+
+  const transporter = nodemailer.createTransport({
+    service: "gmail",
+    auth: {
+      user: gmailUser,
+      pass: gmailAppPassword
+    }
+  });
+
+  try {
+    await transporter.sendMail({
+      from: gmailUser,
+      to: notificationEmail,
+      subject,
+      text: lines.join("\n")
+    });
+    return true;
+  } catch (error) {
+    console.error("[gmail] Failed to send notification safely.");
+    console.error(error.message);
+    return false;
+  }
+}
+
 app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "softstore-digiseller-integration" });
 });
@@ -284,6 +417,12 @@ app.post("/webhook/softstore", async (req, res) => {
     });
 
     const mode = process.env.DELIVERY_MODE || "disabled";
+    const orderId = String(payload.id_order ?? order?.id_order ?? "");
+
+    if (!shouldSkipDuplicateNotification(orderId)) {
+      await sendTelegramOrderNotification(order, payload);
+      await sendGmailOrderNotification(order, payload);
+    }
 
     if (mode === "static") {
       const text = required("STATIC_DELIVERY_TEXT");
