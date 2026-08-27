@@ -185,6 +185,21 @@ function getOrderSummary(order, payload) {
   };
 }
 
+function getTelegramOrderSummary(order) {
+  const source = order && typeof order === "object" ? order : {};
+  const details = source.order && typeof source.order === "object" ? source.order : source;
+  const product = details.product && typeof details.product === "object" ? details.product : {};
+
+  return {
+    productName: details.product_name ?? details.name ?? details.title ?? product.name ?? "N/A",
+    quantity: details.quantity ?? details.qty ?? details.count ?? details.items?.quantity ?? "N/A",
+    amount: details.amount ?? details.total_amount ?? details.total ?? details.price ?? "N/A",
+    currency: details.currency ?? details.currency_code ?? "N/A",
+    idOrder: details.id_order ?? details.order_id ?? "N/A",
+    productId: details.id_product ?? details.product_id ?? product.id ?? "N/A"
+  };
+}
+
 function shouldSkipDuplicateNotification(orderId) {
   if (!orderId || orderId === "N/A") return false;
   if (notifiedOrderIds.has(String(orderId))) {
@@ -204,16 +219,17 @@ async function sendTelegramOrderNotification(order, payload, test = false) {
     return false;
   }
 
-  const summary = getOrderSummary(order, payload);
+  const summary = getTelegramOrderSummary(order);
   const lines = [
     ...(test ? ["TEST NOTIFICATION - NOT A REAL ORDER", ""] : []),
     "🛒 NEW SOFTSTORE ORDER",
     "",
-    `Order ID: ${summary.idOrder}`,
-    `Product ID: ${summary.productId}`,
+    `Product: ${summary.productName}`,
     `Quantity: ${summary.quantity}`,
     `Amount: ${summary.amount}`,
     `Currency: ${summary.currency}`,
+    `Order ID: ${summary.idOrder}`,
+    `Product ID: ${summary.productId}`,
     "Payment Status: PAID"
   ];
 
