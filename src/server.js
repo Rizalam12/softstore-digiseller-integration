@@ -195,7 +195,7 @@ function shouldSkipDuplicateNotification(orderId) {
   return false;
 }
 
-async function sendTelegramOrderNotification(order, payload) {
+async function sendTelegramOrderNotification(order, payload, test = false) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
 
@@ -206,6 +206,7 @@ async function sendTelegramOrderNotification(order, payload) {
 
   const summary = getOrderSummary(order, payload);
   const lines = [
+    ...(test ? ["TEST NOTIFICATION - NOT A REAL ORDER", ""] : []),
     "🛒 NEW SOFTSTORE ORDER",
     "",
     `Order ID: ${summary.idOrder}`,
@@ -248,7 +249,7 @@ async function sendTelegramOrderNotification(order, payload) {
   }
 }
 
-async function sendGmailOrderNotification(order, payload) {
+async function sendGmailOrderNotification(order, payload, test = false) {
   const gmailUser = process.env.GMAIL_EMAIL;
   const gmailAppPassword = process.env.GMAIL_APP_PASSWORD;
   const notificationEmail = process.env.NOTIFICATION_EMAIL;
@@ -259,8 +260,11 @@ async function sendGmailOrderNotification(order, payload) {
   }
 
   const summary = getOrderSummary(order, payload);
-  const subject = `🛒 New SoftStore Order - ${summary.idOrder}`;
+  const subject = test
+    ? "TEST NOTIFICATION - NOT A REAL ORDER"
+    : `🛒 New SoftStore Order - ${summary.idOrder}`;
   const lines = [
+    ...(test ? ["TEST NOTIFICATION - NOT A REAL ORDER", ""] : []),
     "New SoftStore order received.",
     "",
     `Order ID: ${summary.idOrder}`,
@@ -305,6 +309,32 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     status: "ok",
     service: "SoftStore-Digiseller integration"
+  });
+});
+
+app.post("/admin/test-notifications", adminGuard, async (_req, res) => {
+  const fakePayload = {
+    id_order: "TEST-ORDER-123",
+    id_product: "TEST-123",
+    payment_status: "paid"
+  };
+  const fakeOrder = {
+    id_order: "TEST-ORDER-123",
+    id_product: "TEST-123",
+    quantity: 1,
+    payment_status: "paid",
+    name: "TEST PRODUCT"
+  };
+
+  const [telegram, gmail] = await Promise.all([
+    sendTelegramOrderNotification(fakeOrder, fakePayload, true),
+    sendGmailOrderNotification(fakeOrder, fakePayload, true)
+  ]);
+
+  res.json({
+    ok: telegram && gmail,
+    telegram,
+    gmail
   });
 });
 
