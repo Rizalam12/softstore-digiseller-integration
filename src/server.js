@@ -143,10 +143,14 @@ function verifySoftStoreWebhook(payload) {
     )
     .digest("hex");
 
-  return crypto.timingSafeEqual(
-    Buffer.from(expected),
-    Buffer.from(String(payload.signature ?? ""))
-  );
+  const expectedBuffer = Buffer.from(expected);
+  const suppliedBuffer = Buffer.from(String(payload.signature ?? ""));
+
+  if (expectedBuffer.length !== suppliedBuffer.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(expectedBuffer, suppliedBuffer);
 }
 
 function adminGuard(req, res, next) {
