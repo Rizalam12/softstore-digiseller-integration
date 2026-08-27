@@ -293,6 +293,13 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "softstore-digiseller-integration" });
 });
 
+app.get("/", (_req, res) => {
+  res.status(200).json({
+    status: "ok",
+    service: "SoftStore-Digiseller integration"
+  });
+});
+
 /**
  * Check Digiseller authentication and return the seller's visible catalog.
  */
