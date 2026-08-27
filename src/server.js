@@ -121,10 +121,14 @@ async function getDigisellerToken() {
   return digisellerToken;
 }
 
-async function digisellerRequest(path, options = {}) {
-  const token = await getDigisellerToken();
+async function digisellerRequest(path, options = {}, includeToken = true) {
+  const token = includeToken ? await getDigisellerToken() : null;
   const separator = path.includes("?") ? "&" : "?";
-  return jsonFetch(`${DIGISELLER_API_BASE}${path}${separator}token=${encodeURIComponent(token)}`, {
+  const url = includeToken
+    ? `${DIGISELLER_API_BASE}${path}${separator}token=${encodeURIComponent(token)}`
+    : `${DIGISELLER_API_BASE}${path}`;
+
+  return jsonFetch(url, {
     ...options,
     headers: {
       Accept: "application/json",
@@ -326,7 +330,7 @@ app.get("/admin/digiseller/products", adminGuard, async (_req, res) => {
  */
 app.get("/admin/digiseller/product/:id", adminGuard, async (req, res) => {
   try {
-    const data = await digisellerRequest(`/products/${encodeURIComponent(req.params.id)}/data?lang=en-US&currency=USD`);
+    const data = await digisellerRequest(`/products/${encodeURIComponent(req.params.id)}/data?lang=en-US&currency=USD`, {}, false);
     res.json(data);
   } catch (error) {
     console.error(error);
