@@ -45,6 +45,10 @@ Copy `.env.example` to `.env` and fill:
 - DIGISELLER_API_KEY
 - SOFTSTORE_DEFAULT_CATEGORY_ID
 - ADMIN_SECRET
+- RESEND_API_KEY (if email notifications are enabled)
+- RESEND_FROM_EMAIL (verified sender)
+- NOTIFICATION_EMAIL
+- SOFTSTORE_ALLOWED_DELIVERY_HOSTS (required only for test static delivery)
 
 Keep `.env` private and never commit it to GitHub.
 
@@ -137,7 +141,7 @@ DELIVERY_MODE=static
 STATIC_DELIVERY_TEXT=TEST DELIVERY
 ```
 
-Never use static delivery in production.
+Never use static delivery in production. If you temporarily test it, set `SOFTSTORE_ALLOWED_DELIVERY_HOSTS` to the exact trusted hostname returned by SoftStore in `delivery_url`; the server refuses to send its JWT to any other host.
 
 ## Production architecture
 
@@ -173,4 +177,5 @@ Customer
 - Use HTTPS.
 - Keep admin endpoints protected.
 - Verify the SoftStore webhook signature before processing an order.
-- Add idempotency/order locking before production use so the same order cannot be delivered twice.
+- Duplicate notifications and static delivery are suppressed only for the lifetime of one Node.js process. Use a durable shared database/order lock before production use so restarts or multiple instances cannot deliver the same order twice.
+- `.env.example` must contain placeholders only. Rotate any real credentials that were ever committed, uploaded, or shared.

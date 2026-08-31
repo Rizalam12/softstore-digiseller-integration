@@ -1,11 +1,12 @@
 import express from "express";
 import crypto from "node:crypto";
-import nodemailer from "nodemailer";
+import { Resend } from "resend";
 import "dotenv/config";
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
-const notifiedOrderIds = new Set();
+const notificationState = new Map();
+const deliveredOrderIds = new Set();
 
 const PORT = Number(process.env.PORT || 3000);
 const SOFTSTORE_API_BASE =
@@ -24,6 +25,46 @@ function required(name) {
   return value;
 }
 
+function sanitizeForLogs(value) {
+  if (Array.isArray(value)) return value.map(sanitizeForLogs);
+
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        key,
+        /authorization|api[_-]?key|token|secret|password/i.test(key)
+          ? "[REDACTED]"
+          : sanitizeForLogs(item)
+      ])
+    );
+  }
+
+  if (typeof value === "string") {
+    return value.replace(
+      /(authorization|api[_-]?key|token|secret|password)\s*[:=]\s*[^,\s}&]+/gi,
+      "$1=[REDACTED]"
+    );
+  }
+
+  return value;
+}
+
+function sanitizeUrlForLogs(value) {
+  try {
+    const url = new URL(String(value));
+
+    for (const key of [...url.searchParams.keys()]) {
+      if (/authorization|api[_-]?key|token|secret|password/i.test(key)) {
+        url.searchParams.set(key, "[REDACTED]");
+      }
+    }
+
+    return url.toString();
+  } catch {
+    return String(value);
+  }
+}
+
 async function jsonFetch(url, options = {}) {
   const response = await fetch(url, options);
   const text = await response.text();
@@ -35,11 +76,14 @@ async function jsonFetch(url, options = {}) {
   }
 
   if (!response.ok) {
+    const safeUrl = sanitizeUrlForLogs(url);
+    const safeData = sanitizeForLogs(data);
+
     const error = new Error(
-      `HTTP ${response.status} from ${url}: ${JSON.stringify(data)}`
+      `HTTP ${response.status} from ${safeUrl}: ${JSON.stringify(safeData)}`
     );
     error.status = response.status;
-    error.data = data;
+    error.data = safeData;
     throw error;
   }
   return data;
@@ -200,14 +244,72 @@ function getTelegramOrderSummary(order) {
   };
 }
 
-function shouldSkipDuplicateNotification(orderId) {
-  if (!orderId || orderId === "N/A") return false;
-  if (notifiedOrderIds.has(String(orderId))) {
-    console.warn(`[notifications] Duplicate notification suppressed for order ID ${orderId}.`);
-    return true;
+function getNotificationState(orderId) {
+  const key = String(orderId || "");
+
+  if (!key || key === "N/A") {
+    return {
+      key: null,
+      telegram: false,
+      email: false
+    };
   }
-  notifiedOrderIds.add(String(orderId));
-  return false;
+
+  const saved =
+    notificationState.get(key) || {};
+
+  return {
+    key,
+    telegram: saved.telegram === true,
+    email: saved.email === true
+  };
+}
+
+function saveNotificationState(state) {
+  if (!state.key) return;
+
+  notificationState.set(
+    state.key,
+    {
+      telegram: state.telegram === true,
+      email: state.email === true
+    }
+  );
+}
+
+async function sendOrderNotifications(order, payload) {
+  const orderId =
+    payload?.id_order ?? order?.id_order ?? "N/A";
+
+  const state =
+    getNotificationState(orderId);
+
+  if (state.telegram && state.email) {
+    console.warn(
+      `[notifications] Duplicate notification suppressed for order ID ${orderId}.`
+    );
+
+    return state;
+  }
+
+  if (!state.telegram) {
+    state.telegram =
+      await sendTelegramOrderNotification(
+        order,
+        payload
+      );
+  }
+
+  if (!state.email) {
+    state.email =
+      await sendGmailOrderNotification(
+        order,
+        payload
+      );
+  }
+
+  saveNotificationState(state);
+  return state;
 }
 
 async function sendTelegramOrderNotification(order, payload, test = false) {
@@ -266,12 +368,12 @@ async function sendTelegramOrderNotification(order, payload, test = false) {
 }
 
 async function sendGmailOrderNotification(order, payload, test = false) {
-  const gmailUser = process.env.GMAIL_EMAIL;
-  const gmailAppPassword = process.env.GMAIL_APP_PASSWORD;
+  const resendApiKey = process.env.RESEND_API_KEY;
+  const resendFromEmail = process.env.RESEND_FROM_EMAIL;
   const notificationEmail = process.env.NOTIFICATION_EMAIL;
 
-  if (!gmailUser || !gmailAppPassword || !notificationEmail) {
-    console.warn("[gmail] Gmail notification is not configured; skipping.");
+  if (!resendApiKey || !resendFromEmail || !notificationEmail) {
+    console.warn("[email] Resend notification is not configured; skipping.");
     return false;
   }
 
@@ -294,28 +396,23 @@ async function sendGmailOrderNotification(order, payload, test = false) {
   if (order?.status) lines.push(`Status: ${order.status}`);
   if (order?.created_at) lines.push(`Created: ${order.created_at}`);
 
-  const transporter = nodemailer.createTransport({
-    host: "smtp.gmail.com",
-    port: 465,
-    secure: true,
-    family: 4,
-    auth: {
-      user: gmailUser,
-      pass: gmailAppPassword
-    }
-  });
-
   try {
-    await transporter.sendMail({
-      from: gmailUser,
+    const resend = new Resend(resendApiKey);
+    const { error } = await resend.emails.send({
+      from: resendFromEmail,
       to: notificationEmail,
       subject,
       text: lines.join("\n")
     });
+
+    if (error) {
+      throw new Error(error.message || "Resend email API request failed");
+    }
+
     return true;
   } catch (error) {
-    console.error("[gmail] Failed to send notification safely.");
-    console.error(error.message);
+    console.error("[email] Resend notification failed safely.");
+    console.error(error.message || "Resend email API request failed");
     return false;
   }
 }
@@ -483,15 +580,32 @@ app.post("/webhook/softstore", async (req, res) => {
     const mode = process.env.DELIVERY_MODE || "disabled";
     const orderId = String(payload.id_order ?? order?.id_order ?? "");
 
-    if (!shouldSkipDuplicateNotification(orderId)) {
-      await sendTelegramOrderNotification(order, payload);
-      await sendGmailOrderNotification(order, payload);
-    }
+    await sendOrderNotifications(order, payload);
 
     if (mode === "static") {
       const text = required("STATIC_DELIVERY_TEXT");
 
-      await deliverToSoftStore(payload.delivery_url, text);
+      if (orderId && deliveredOrderIds.has(orderId)) {
+        console.warn(
+          `[delivery] Duplicate static delivery suppressed for order ID ${orderId}.`
+        );
+
+        return res.json({
+          ok: true,
+          delivered: true,
+          duplicate: true,
+          mode: "static"
+        });
+      }
+
+      await deliverToSoftStore(
+        payload.delivery_url,
+        text
+      );
+
+      if (orderId) {
+        deliveredOrderIds.add(orderId);
+      }
 
       return res.json({
         ok: true,
@@ -519,12 +633,53 @@ app.post("/webhook/softstore", async (req, res) => {
   }
 });
 
+function validateSoftStoreDeliveryUrl(deliveryUrl) {
+  let parsed;
+
+  try {
+    parsed = new URL(String(deliveryUrl));
+  } catch {
+    throw new Error("SoftStore delivery_url is not a valid URL.");
+  }
+
+  if (parsed.protocol !== "https:") {
+    throw new Error("SoftStore delivery_url must use HTTPS.");
+  }
+
+  const allowedHosts = String(
+    process.env.SOFTSTORE_ALLOWED_DELIVERY_HOSTS || ""
+  )
+    .split(",")
+    .map(value => value.trim().toLowerCase())
+    .filter(Boolean);
+
+  if (!allowedHosts.length) {
+    throw new Error(
+      "SOFTSTORE_ALLOWED_DELIVERY_HOSTS is required before DELIVERY_MODE=static can be used."
+    );
+  }
+
+  if (!allowedHosts.includes(parsed.hostname.toLowerCase())) {
+    throw new Error(
+      `Refusing to send SoftStore JWT to untrusted delivery host: ${parsed.hostname}`
+    );
+  }
+
+  return parsed.toString();
+}
+
 async function deliverToSoftStore(deliveryUrl, text, download) {
+  const safeDeliveryUrl =
+    validateSoftStoreDeliveryUrl(deliveryUrl);
+
   const jwt = await getSoftStoreJwt();
   const body = { text };
-  if (download) body.download = download;
 
-  return jsonFetch(deliveryUrl, {
+  if (download) {
+    body.download = download;
+  }
+
+  return jsonFetch(safeDeliveryUrl, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${jwt}`,
